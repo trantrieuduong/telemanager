@@ -240,17 +240,33 @@ class ProxyDialog(ctk.CTkToplevel):
     def _handle_test_connection(self):
         host = self.entry_host.get().strip()
         port_str = self.entry_port.get().strip()
+        ptype = self.opt_type.get()
+        user = self.entry_user.get().strip()
+        pwd = self.entry_pass.get().strip()
+
         try:
             port = int(port_str)
+            if port <= 0 or port > 65535:
+                raise ValueError()
         except ValueError:
             messagebox.showerror("Lỗi", "Port phải là số nguyên hợp lệ (1 - 65535).", parent=self)
             return
 
-        self.lbl_test_result.configure(text="Đang kiểm tra...", text_color="#e0e0e0")
+        temp_proxy = ProxyConfig(
+            enabled=True,
+            proxy_type=ptype,
+            host=host,
+            port=port,
+            username=user if ptype != "MTProto" else "",
+            password=pwd if ptype != "MTProto" else "",
+            secret=pwd if ptype == "MTProto" else "",
+        )
+
+        self.lbl_test_result.configure(text="Đang bắt tay và kiểm tra proxy...", text_color="#e0e0e0")
         self.btn_test.configure(state="disabled")
 
         def _run_test():
-            success, msg, latency = ProxyService.test_connection(host, port)
+            success, msg, latency = ProxyService.test_proxy_strict(temp_proxy, timeout=5.0)
             self.after(0, lambda: self._update_test_ui(success, msg, latency))
 
         threading.Thread(target=_run_test, daemon=True).start()
@@ -259,7 +275,7 @@ class ProxyDialog(ctk.CTkToplevel):
         self.btn_test.configure(state="normal")
         if success:
             self.lbl_test_result.configure(
-                text=f"Hoạt động ({latency} ms)",
+                text=f"{msg} ({latency} ms)",
                 text_color="#66bb6a",
             )
         else:
@@ -299,6 +315,23 @@ class ProxyDialog(ctk.CTkToplevel):
             password=pwd if ptype != "MTProto" else "",
             secret=pwd if ptype == "MTProto" else "",
         )
+
+        # Kiểm tra trước khi lưu để cảnh báo người dùng nếu proxy chết
+        if enabled:
+            is_alive, check_msg, _ = ProxyService.test_proxy_strict(proxy_config, timeout=3.5)
+            if not is_alive:
+                confirm = messagebox.askyesno(
+                    "CẢNH BÁO PROXY KHÔNG HOẠT ĐỘNG",
+                    f"Proxy vừa nhập hiện tại KHÔNG PHẢN HỒI HOẶC XÁC THỰC THẤT BẠI!\n\n"
+                    f"Chi tiết: {check_msg}\n\n"
+                    "LƯU Ý NGHIÊM NGẶT:\n"
+                    "Do cơ chế bảo vệ danh tính (Strict Proxy Mode), tài khoản này sẽ BỊ CHẶN KHÔNG CHO KHỞI CHẠY "
+                    "cho đến khi bạn cấu hình một Proxy còn hoạt động.\n\n"
+                    "Bạn có chắc chắn vẫn muốn lưu cấu hình này không?",
+                    parent=self,
+                )
+                if not confirm:
+                    return
 
         if self.on_save:
             self.on_save(proxy_config)

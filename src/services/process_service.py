@@ -2,12 +2,16 @@ import os
 import subprocess
 import threading
 from typing import Dict, Set, Optional
+from ..models.profile import ProxyConfig
+from .proxy_service import ProxyService, LocalHttpToSocks5Bridge
 
 
 class ProcessService:
     def __init__(self):
         # Lưu trữ các tiến trình được khởi chạy trực tiếp từ ứng dụng
         self._active_processes: Dict[str, subprocess.Popen] = {}
+        # Quản lý các cầu nối Proxy cục bộ cho từng profile (Local SOCKS5 Bridge)
+        self._proxy_bridges: Dict[str, LocalHttpToSocks5Bridge] = {}
         # Bộ nhớ đệm danh sách profile đang chạy được quét từ hệ thống
         self._system_running_profiles: Set[str] = set()
         self._is_scanning = False
@@ -17,14 +21,52 @@ class ProcessService:
         exe_path: str,
         profile_path: str,
         folder_name: str,
-        deep_link: Optional[str] = None,
+        proxy: Optional[ProxyConfig] = None,
     ) -> bool:
-        """Khởi chạy Telegram.exe với tham số -workdir và liên kết deep link nếu có."""
+        """
+        Khởi chạy Telegram.exe với tham số -workdir và áp dụng cấu hình Proxy nghiêm ngặt.
+        - Nếu là Proxy HTTP: Khởi động Local SOCKS5 Bridge để chuyển tiếp lưu lượng an toàn.
+        - Nếu là Proxy SOCKS5 / MTProto: Nạp trực tiếp qua liên kết tg:// tương ứng.
+        """
         if not os.path.exists(exe_path):
             return False
 
         if not os.path.exists(profile_path):
             os.makedirs(profile_path, exist_ok=True)
+
+        key = folder_name.lower()
+
+        # Dọn dẹp cầu nối proxy cũ nếu còn tồn đọng
+        if key in self._proxy_bridges:
+            try:
+                self._proxy_bridges[key].stop()
+            except Exception:
+                pass
+            del self._proxy_bridges[key]
+
+        deep_link = None
+        if proxy and proxy.enabled and proxy.host:
+            ptype = (proxy.proxy_type or "SOCKS5").upper()
+
+            if ptype == "HTTP":
+                # Khởi tạo Local SOCKS5 Bridge
+                bridge = LocalHttpToSocks5Bridge(
+                    remote_host=proxy.host,
+                    remote_port=proxy.port,
+                    remote_user=proxy.username,
+                    remote_pass=proxy.password,
+                )
+                try:
+                    local_port = bridge.start()
+                    self._proxy_bridges[key] = bridge
+                    deep_link = ProxyService.build_deep_link(
+                        proxy, local_socks5_port=local_port
+                    )
+                except Exception:
+                    deep_link = None
+
+            elif ptype in ["SOCKS5", "MTPROTO"]:
+                deep_link = ProxyService.build_deep_link(proxy)
 
         cmd = [exe_path, "-workdir", profile_path]
         if deep_link:
@@ -32,19 +74,33 @@ class ProcessService:
 
         try:
             proc = subprocess.Popen(cmd)
-            key = folder_name.lower()
             self._active_processes[key] = proc
             self._system_running_profiles.add(key)
             return True
         except Exception:
+            # Nếu khởi chạy tiến trình thất bại, lập tức dừng cầu nối proxy nếu đã tạo
+            if key in self._proxy_bridges:
+                try:
+                    self._proxy_bridges[key].stop()
+                except Exception:
+                    pass
+                del self._proxy_bridges[key]
             return False
 
     def terminate_profile(self, profile_path: str, folder_name: str) -> bool:
-        """Đóng tiến trình Telegram đang chạy của profile một cách an toàn và triệt để."""
+        """Đóng tiến trình Telegram đang chạy của profile và giải phóng cầu nối proxy."""
         key = folder_name.lower()
         stopped_any = False
 
-        # 1. Đóng tiến trình được quản lý bởi Popen
+        # 1. Giải phóng cầu nối Proxy cục bộ nếu có
+        if key in self._proxy_bridges:
+            try:
+                self._proxy_bridges[key].stop()
+            except Exception:
+                pass
+            del self._proxy_bridges[key]
+
+        # 2. Đóng tiến trình được quản lý bởi Popen
         proc = self._active_processes.get(key)
         if proc is not None:
             try:
@@ -59,7 +115,7 @@ class ProcessService:
             finally:
                 self._active_processes.pop(key, None)
 
-        # 2. Tìm và đóng tất cả tiến trình Telegram.exe có CommandLine khớp với thư mục profile
+        # 3. Tìm và đóng tất cả tiến trình Telegram.exe có CommandLine khớp với thư mục profile
         norm_profile_path = os.path.abspath(profile_path).replace("'", "''")
         ps_kill_cmd = (
             f"$target = '{norm_profile_path}'.ToLower(); "
@@ -101,9 +157,24 @@ class ProcessService:
                 return True
             else:
                 del self._active_processes[key]
+                # Dọn dẹp bridge nếu tiến trình đã tự tắt
+                if key in self._proxy_bridges:
+                    try:
+                        self._proxy_bridges[key].stop()
+                    except Exception:
+                        pass
+                    del self._proxy_bridges[key]
 
         # 2. Kiểm tra từ danh sách hệ thống đã quét
-        return key in self._system_running_profiles
+        running = key in self._system_running_profiles
+        if not running and key in self._proxy_bridges:
+            try:
+                self._proxy_bridges[key].stop()
+            except Exception:
+                pass
+            del self._proxy_bridges[key]
+
+        return running
 
     def scan_running_profiles_async(self, profiles_dir: str):
         """Quét hệ thống trong luồng nền để tìm các profile đang chạy."""
@@ -171,5 +242,11 @@ class ProcessService:
                 running_set.add(k)
             else:
                 del self._active_processes[k]
+                if k in self._proxy_bridges:
+                    try:
+                        self._proxy_bridges[k].stop()
+                    except Exception:
+                        pass
+                    del self._proxy_bridges[k]
 
         return running_set

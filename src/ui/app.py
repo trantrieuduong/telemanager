@@ -179,15 +179,42 @@ class TelegramManagerApp(ctk.CTk):
 
         profile_path = os.path.join(config.PROFILES_DIR, profile.folder_name)
 
-        deep_link = None
+        # 1. Chốt chặn kiểm tra Proxy nghiêm ngặt (Strict Launch Gate)
         if profile.proxy.enabled:
-            deep_link = self.proxy_service.build_deep_link(profile.proxy)
+            # Kiểm tra bắt buộc sống còn của proxy trước khi cho phép mở
+            success, err_msg, latency = self.proxy_service.test_proxy_strict(profile.proxy, timeout=4.0)
+            if not success:
+                messagebox.showerror(
+                    "CHẶN KHỞI CHẠY - PROXY KHÔNG HOẠT ĐỘNG",
+                    f"Tài khoản: {profile.display_name}\n\n"
+                    f"Proxy [{profile.proxy.proxy_type}] {profile.proxy.host}:{profile.proxy.port} "
+                    f"KHÔNG HOẠT ĐỘNG HOẶC XÁC THỰC THẤT BẠI!\n\n"
+                    f"Chi tiết lỗi: {err_msg}\n\n"
+                    "CẢNH BÁO AN TOÀN:\n"
+                    "Để bảo vệ tài khoản khỏi bị cấm và TUYỆT ĐỐI NGĂN CHẶN việc rò rỉ địa chỉ IP thật của máy tính, "
+                    "hệ thống đã từ chối khởi chạy Telegram.\n\n"
+                    "Vui lòng cấu hình lại Proxy còn hoạt động trước khi mở tài khoản này.",
+                    parent=self,
+                )
+                return
+        else:
+            # Cảnh báo người dùng nếu tài khoản chưa cấu hình proxy
+            confirm = messagebox.askyesno(
+                "Cảnh báo không dùng Proxy",
+                f"Tài khoản '{profile.display_name}' HIỆN CHƯA BẬT PROXY.\n\n"
+                "Nếu tiếp tục, tài khoản sẽ kết nối trực tiếp bằng địa chỉ IP thật của máy tính này.\n\n"
+                "Bạn có chắc chắn muốn mở tài khoản bằng IP thật không?",
+                parent=self,
+            )
+            if not confirm:
+                return
 
+        # 2. Khởi chạy Telegram qua ProcessService kèm cấu hình Proxy được quản lý
         success = self.process_service.launch(
             exe_path=config.TELEGRAM_EXE,
             profile_path=profile_path,
             folder_name=profile.folder_name,
-            deep_link=deep_link,
+            proxy=profile.proxy,
         )
 
         if success:

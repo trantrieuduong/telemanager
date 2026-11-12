@@ -86,8 +86,8 @@ class ProfileCard(ctk.CTkFrame):
             proxy_info = f"Proxy: [{proxy.proxy_type}] {proxy.host}:{proxy.port}"
             proxy_color = "#64b5f6"
         else:
-            proxy_info = "Không dùng proxy"
-            proxy_color = "#777777"
+            proxy_info = "Không dùng Proxy (Dùng IP thật của máy)"
+            proxy_color = "#ffb74d"
 
         lbl_proxy = ctk.CTkLabel(
             info_frame,
